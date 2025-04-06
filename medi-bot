@@ -1,0 +1,564 @@
+#!/usr/bin/env python3
+"""
+AI Medical Consultation System
+
+A comprehensive medical consultation tool leveraging AI
+for initial symptom assessment and doctor recommendations.
+
+Dependencies:
+- pandas
+- google-generativeai
+- reportlab
+"""
+
+import os
+import sys
+import pandas as pd
+from datetime import datetime
+import google.generativeai as genai
+import reportlab.lib.colors as colors
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+
+class MedicalConsultationSystem:
+    def __init__(self, gemini_api_key):
+        """
+        Initialize the Medical Consultation System
+
+        Args:
+            gemini_api_key (str): Google Gemini API key
+        """
+        try:
+            genai.configure(api_key=gemini_api_key)
+            self.model = genai.GenerativeModel('gemini-2.0-flash-001')  # Use correct model name
+            self.doctors_df = self._load_doctors_database()
+        except Exception as e:
+            print(f"❌ Error initializing system: {str(e)}")
+            raise
+
+    def _load_doctors_database(self, csv_path="doctors_database.csv"):
+        """
+        Load doctors database from CSV file or create a sample database
+
+        Args:
+            csv_path (str): Path to the CSV file
+
+        Returns:
+            pandas.DataFrame: Doctors database
+        """
+        try:
+            # Try to load existing database
+            doctors_df = pd.read_csv(csv_path)
+            print(f"✅ Successfully loaded {len(doctors_df)} doctors from database.")
+            return doctors_df
+        except FileNotFoundError:
+            print("⚠ Doctors database not found. Creating sample database...")
+
+            # Create sample doctors database
+            sample_data = {
+                'Name': ['Dr. John Smith', 'Dr. Sarah Johnson', 'Dr. Robert Chen',
+                        'Dr. Emily Davis', 'Dr. Michael Wong', 'Dr. Lisa Brown',
+                        'Dr. David Miller', 'Dr. Jennifer Lee'],
+                'Specialization': ['Cardiology', 'Neurology', 'Pulmonology',
+                                  'Gastroenterology', 'Dermatology', 'Orthopedics',
+                                  'ENT', 'General Practice'],
+                'Location': ['Memorial Hospital', 'City Medical Center', 'University Hospital',
+                            'Downtown Clinic', 'Westside Medical', 'Eastside Health',
+                            'North Medical Center', 'South Community Clinic'],
+                'Experience': ['15 years', '10 years', '20 years',
+                              '8 years', '12 years', '7 years',
+                              '18 years', '5 years'],
+                'Rating': [4.8, 4.7, 4.9, 4.5, 4.6, 4.4, 4.8, 4.3],
+                'Contact': ['555-1234', '555-2345', '555-3456',
+                           '555-4567', '555-5678', '555-6789',
+                           '555-7890', '555-8901']
+            }
+            doctors_df = pd.DataFrame(sample_data)
+            doctors_df.to_csv('doctors_database.csv', index=False)
+            print("✅ Sample doctors database created.")
+            return doctors_df
+
+    def check_emergency(self, symptoms):
+        """
+        Detect emergency symptoms that require immediate medical attention
+
+        Args:
+            symptoms (str): Patient's reported symptoms
+
+        Returns:
+            bool: True if emergency symptoms detected, False otherwise
+        """
+        emergency_list = [
+            "chest pain", "difficulty breathing", "severe bleeding",
+            "loss of consciousness", "sudden numbness", "slurred speech"
+        ]
+        return any(symptom in symptoms.lower() for symptom in emergency_list)
+
+    def find_matching_doctors(self, symptoms, top_n=5):
+        """
+        Find top N doctors matching the symptoms from the database
+
+        Args:
+            symptoms (str): Patient's reported symptoms
+            top_n (int): Number of top doctors to return
+
+        Returns:
+            pandas.DataFrame: Top matching doctors
+        """
+        if self.doctors_df is None or self.doctors_df.empty:
+            print("⚠ No doctors database available.")
+            return None
+
+        # Convert symptoms to lowercase for matching
+        symptoms_lower = symptoms.lower()
+
+        # Specialization keyword mappings
+        specializations = {
+            "cardiology": ["heart", "chest pain", "palpitation"],
+            "neurology": ["headache", "dizziness", "numbness", "seizure"],
+            "pulmonology": ["cough", "breathing", "lung", "respiratory"],
+            "gastroenterology": ["stomach", "nausea", "vomiting", "diarrhea", "abdominal"],
+            "dermatology": ["skin", "rash", "itching"],
+            "orthopedics": ["bone", "joint", "pain", "fracture", "sprain"],
+            "ent": ["ear", "nose", "throat", "sinus"],
+            "ophthalmology": ["eye", "vision", "blurry"],
+            "gynecology": ["menstrual", "period", "pregnancy"],
+            "urology": ["urination", "kidney", "bladder"],
+            "psychiatry": ["anxiety", "depression", "stress", "sleep"],
+            "general practice": ["fever", "cold", "flu"]
+        }
+
+        # Calculate match score for each doctor
+        scores = []
+        for index, doctor in self.doctors_df.iterrows():
+            score = 0
+            doctor_specialization = doctor['Specialization'].lower()
+
+            # Check specialty keywords
+            for specialty, keywords in specializations.items():
+                if specialty in doctor_specialization:
+                    for keyword in keywords:
+                        if keyword in symptoms_lower:
+                            score += 3
+
+            # Add experience factor
+            try:
+                experience_years = int(str(doctor['Experience']).split()[0])
+                score += min(experience_years / 2, 5)
+            except (ValueError, IndexError):
+                pass
+
+            # Add rating factor
+            try:
+                rating = float(doctor['Rating'])
+                score += rating
+            except ValueError:
+                pass
+
+            scores.append((index, score))
+
+        # Sort and get top N doctors
+        scores.sort(key=lambda x: x[1], reverse=True)
+        top_indices = [idx for idx, _ in scores[:top_n]]
+
+        return self.doctors_df.iloc[top_indices].reset_index(drop=True)
+
+    def generate_medical_assessment(self, conversation_memory):
+        """
+        Generate medical assessment using Gemini AI
+
+        Args:
+            conversation_memory (dict): Patient's medical conversation details
+
+        Returns:
+            tuple: AI response and recommended doctors
+        """
+        # Emergency detection
+        if self.check_emergency(conversation_memory["symptoms"]):
+            return "🚨 Emergency detected! Please seek medical attention immediately.", None
+
+        # Find matching doctors
+        recommended_doctors = self.find_matching_doctors(conversation_memory["symptoms"])
+
+        # Format doctor recommendations
+        doctor_recommendations = ""
+        if recommended_doctors is not None and not recommended_doctors.empty:
+            for i, doctor in recommended_doctors.iterrows():
+                doctor_recommendations += f"""
+                Doctor {i+1}:
+                - Name: {doctor.get('Name', 'N/A')}
+                - Specialization: {doctor.get('Specialization', 'N/A')}
+                - Location: {doctor.get('Location', 'N/A')}
+                - Experience: {doctor.get('Experience', 'N/A')}
+                - Rating: {doctor.get('Rating', 'N/A')}
+                - Contact: {doctor.get('Contact', 'N/A')}
+                """
+
+        # Context-aware AI prompt
+        prompt = f"""
+        You are an advanced, context-aware AI medical assistant. Provide structured medical guidance.
+
+        ### Patient Information:
+        🔹 Symptoms: {conversation_memory["symptoms"]}
+        🔹 Allergies: {conversation_memory["allergies"]}
+        🔹 Medications: {conversation_memory["medications"]}
+
+        ### Doctor Recommendations:
+        {doctor_recommendations}
+
+        ### Response Structure:
+        1. Possible Conditions (2-3 potential conditions)
+        2. Severity Classification (Mild/Moderate/Severe)
+        3. Recommended Next Steps
+        4. Brief Doctor Recommendation Rationale
+
+        Provide a clear, concise, and professional medical assessment.
+        """
+
+        try:
+            # Generate AI response
+            response = self.model.generate_content(prompt)
+            return response.text, recommended_doctors
+        except Exception as e:
+            print(f"❌ Error generating AI response: {str(e)}")
+            return "Error generating medical assessment. Please try again.", recommended_doctors
+
+    def create_medical_report(self, conversation_memory, ai_response, recommended_doctors):
+        """
+        Generate a comprehensive medical report PDF with a standardized format.
+
+        Args:
+            conversation_memory (dict): Patient's medical information
+            ai_response (str): AI's medical assessment
+            recommended_doctors (pandas.DataFrame): Recommended doctors
+
+        Returns:
+            str: Path to the generated report file
+        """
+        try:
+            # Generate unique filename
+            filename = f"medical_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+
+            # Create PDF document
+            doc = SimpleDocTemplate(
+                filename,
+                pagesize=letter,
+                rightMargin=0.75 * inch,
+                leftMargin=0.75 * inch,
+                topMargin=0.75 * inch,
+                bottomMargin=0.75 * inch
+            )
+
+            # Prepare story (content) for PDF
+            story = []
+
+            # Get sample style sheet
+            styles = getSampleStyleSheet()
+
+            # Custom styles
+            title_style = ParagraphStyle(
+                'TitleStyle',
+                parent=styles['Title'],
+                fontSize=18,
+                alignment=TA_CENTER,
+                spaceAfter=24
+            )
+
+            heading_style = ParagraphStyle(
+                'HeadingStyle',
+                parent=styles['Heading2'],
+                fontSize=14,
+                textColor=colors.darkblue,
+                spaceBefore=12,
+                spaceAfter=6
+            )
+
+            normal_style = ParagraphStyle(
+                'NormalStyle',
+                parent=styles['Normal'],
+                fontSize=10,
+                spaceAfter=6
+            )
+
+            footer_style = ParagraphStyle(
+                'FooterStyle',
+                parent=styles['Normal'],
+                fontSize=8,
+                textColor=colors.grey,
+                alignment=TA_CENTER
+            )
+
+            # Cover Page
+            story.append(Paragraph("Medical Consultation Report", title_style))
+            story.append(Paragraph("Generated by AI Medical Consultation System", normal_style))
+            story.append(Spacer(1, 0.5 * inch))
+            story.append(Paragraph(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", normal_style))
+            story.append(Spacer(1, 0.5 * inch))
+            story.append(Paragraph("Patient Information", heading_style))
+            patient_info = [
+                f"Symptoms: {conversation_memory.get('symptoms', 'Not provided')}",
+                f"Allergies: {conversation_memory.get('allergies', 'None reported')}",
+                f"Medications: {conversation_memory.get('medications', 'None reported')}"
+            ]
+            for info in patient_info:
+                story.append(Paragraph(info, normal_style))
+            story.append(Spacer(1, 1 * inch))
+
+            # AI Assessment Section
+            story.append(Paragraph("AI Medical Assessment", heading_style))
+            paragraphs = [p.strip() for p in ai_response.split('\n') if p.strip()]
+            for paragraph in paragraphs:
+                story.append(Paragraph(paragraph, normal_style))
+            story.append(Spacer(1, 0.5 * inch))
+
+            # Recommended Doctors Section
+            story.append(Paragraph("Recommended Doctors", heading_style))
+            if recommended_doctors is not None and not recommended_doctors.empty:
+                doctor_data = [['Name', 'Specialization', 'Location', 'Contact']]
+                for _, doctor in recommended_doctors.iterrows():
+                    doctor_data.append([
+                        str(doctor.get('Name', 'N/A')),
+                        str(doctor.get('Specialization', 'N/A')),
+                        str(doctor.get('Location', 'N/A')),
+                        str(doctor.get('Contact', 'N/A'))
+                    ])
+                table = Table(
+                    doctor_data,
+                    colWidths=[2.5 * inch, 2 * inch, 2 * inch, 1.5 * inch]
+                )
+                table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                    ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+                    ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                    ('FONTSIZE', (0, 1), (-1, -1), 9),
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')
+                ]))
+                story.append(table)
+            else:
+                story.append(Paragraph("No doctors found matching the criteria.", normal_style))
+
+            # Footer
+            story.append(Spacer(1, 0.5 * inch))
+            disclaimer = "Disclaimer: This is an AI-generated report. Consult a healthcare professional for comprehensive medical advice."
+            story.append(Paragraph(disclaimer, footer_style))
+
+            # Build PDF
+            doc.build(story)
+            print(f"✅ Medical report generated: {os.path.abspath(filename)}")
+            return filename
+
+        except Exception as e:
+            print(f"❌ Error generating PDF report: {str(e)}")
+            return None
+
+def main():
+    """
+    Main entry point for the Medical Consultation System
+    """
+    GEMINI_API_KEY = "AIzaSyBr9Mff2m7L7FYNbsHTEcT07mZ31Z3rohQ"  # Replace with your valid Google Gemini API key
+
+    try:
+        # Initialize Medical Consultation System
+        med_system = MedicalConsultationSystem(GEMINI_API_KEY)
+
+        # Welcome message
+        print("🩺 Welcome to AI Medical Consultation System 🩺")
+        print("------------------------------------------------")
+
+        # Collect initial patient information
+        conversation_memory = {}
+
+        # Symptoms input
+        while True:
+            symptoms = input("Please describe your symptoms (be as detailed as possible): ").strip()
+            if symptoms:
+                conversation_memory["symptoms"] = symptoms
+                break
+            print("❌ Symptoms cannot be empty. Please provide details.")
+
+        # Allergies input
+        conversation_memory["allergies"] = input("Do you have any known allergies? (If none, type 'None'): ").strip()
+
+        # Medications input
+        conversation_memory["medications"] = input("Are you currently taking any medications? (If none, type 'None'): ").strip()
+
+        # Additional details (optional)
+        additional_details = input("Would you like to add any additional details about your symptoms? (Optional, press Enter to skip): ").strip()
+        if additional_details:
+            conversation_memory["symptoms"] += f". Additional details: {additional_details}"
+
+        # Generate medical assessment
+        try:
+            print("\n🔍 Analyzing your symptoms...")
+            ai_response, recommended_doctors = med_system.generate_medical_assessment(conversation_memory)
+
+            # Display AI Assessment
+            print("\n📋 Medical Assessment:")
+            print(ai_response)
+
+            # Generate PDF Report
+            print("\n📄 Generating medical report...")
+            report_path = med_system.create_medical_report(conversation_memory, ai_response, recommended_doctors)
+            print(f"✅ Medical report saved: {report_path}")
+
+        except Exception as assessment_error:
+            print(f"❌ Error during medical assessment: {assessment_error}")
+            print("Please try again or contact support.")
+
+        # Continuation loop
+        while True:
+            continue_chat = input("\nWould you like to continue or ask follow-up questions? (yes/no): ").lower()
+            if continue_chat != 'yes':
+                print("Thank you for using the AI Medical Consultation System. Stay healthy! 👋")
+                break
+
+            # Additional symptom or concern
+            follow_up = input("Please describe your follow-up symptoms or concerns: ").strip()
+
+            # Update conversation memory
+            conversation_memory["symptoms"] = follow_up
+
+            # Generate follow-up assessment
+            try:
+                print("\n🔍 Analyzing follow-up symptoms...")
+                ai_response, recommended_doctors = med_system.generate_medical_assessment(conversation_memory)
+
+                # Display AI Assessment
+                print("\n📋 Follow-up Medical Assessment:")
+                print(ai_response)
+
+                # Generate PDF Report
+                print("\n📄 Generating follow-up medical report...")
+                report_path = med_system.create_medical_report(conversation_memory, ai_response, recommended_doctors)
+                print(f"✅ Follow-up medical report saved: {report_path}")
+
+            except Exception as follow_up_error:
+                print(f"❌ Error during follow-up assessment: {follow_up_error}")
+                print("Please try again or contact support.")
+
+    except Exception as main_error:
+        print(f"❌ Critical error in Medical Consultation System: {main_error}")
+        print("The application encountered an unexpected error.")
+        sys.exit(1)
+
+# Requirements checker
+def check_dependencies():
+    """
+    Check and display required dependencies
+    """
+    dependencies = [
+        ('google.generativeai', 'Google GenerativeAI'),
+        ('pandas', 'Pandas'),
+        ('reportlab', 'ReportLab PDF Library')
+    ]
+
+    print("🔍 Checking System Dependencies:")
+    for module, name in dependencies:
+        try:
+            __import__(module)
+            print(f"✅ {name} is installed")
+        except ImportError:
+            print(f"❌ {name} is NOT installed. Please install using:")
+            if module == 'google.generativeai':
+                print("   pip install google-generativeai")
+            elif module == 'pandas':
+                print("   pip install pandas")
+            elif module == 'reportlab':
+                print("   pip install reportlab")
+
+# Installation instructions
+def print_installation_guide():
+    """
+    Print comprehensive installation guide
+    """
+    print("\n🛠 Medical Consultation System - Installation Guide 🛠")
+    print("==================================================")
+    print("1. Install Python 3.8 or higher")
+    print("2. Install required dependencies:")
+    print("   pip install google-generativeai pandas reportlab")
+    print("3. Obtain a Gemini AI API Key from Google AI Studio")
+    print("4. Replace 'YOUR_GEMINI_API_KEY_HERE' in the script")
+    print("5. Run the application")
+    print("==================================================")
+
+# Main execution
+if __name__ == "_main_":
+    # Check for help or version
+    if len(sys.argv) > 1:
+        if sys.argv[1] in ['-h', '--help']:
+            print_installation_guide()
+        elif sys.argv[1] in ['-v', '--version']:
+            print("Medical Consultation System v1.0.0")
+        elif sys.argv[1] == '--check-deps':
+            check_dependencies()
+    else:
+        # Normal execution
+        try:
+            main()
+        except KeyboardInterrupt:
+            print("\n\n👋 Application terminated by user.")
+            sys.exit(0)
+
+# Install dependencies function (optional)
+def install_dependencies():
+    """
+    Attempt to install required dependencies
+    """
+    try:
+        import subprocess
+        import sys
+
+        # List of required packages
+        packages = [
+            'google-generativeai',
+            'pandas',
+            'reportlab'
+        ]
+
+        # Install packages
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + packages)
+        print("✅ All dependencies installed successfully!")
+    except Exception as e:
+        print(f"❌ Error installing dependencies: {e}")
+        print("Please install manually using pip")
+
+# Add logging support
+import logging
+
+def setup_logging():
+    """
+    Configure logging for the application
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('medical_consultation.log'),
+            logging.StreamHandler()
+        ]
+    )
+    return logging.getLogger(__name__)
+
+# Logger initialization
+logger = setup_logging()
+
+# Add error tracking and reporting
+def report_error(error):
+    """
+    Log and potentially report critical errors
+    """
+    logger.error(f"Critical Error: {error}", exc_info=True)
+    # Future enhancement: Could add error reporting to a monitoring service
+
+if __name__ == "__main__":
+    main()
